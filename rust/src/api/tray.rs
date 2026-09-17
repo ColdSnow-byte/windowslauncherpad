@@ -3,7 +3,9 @@
 //! 启动台被收起时只是隐藏窗口，进程继续留在托盘里，因此再次呼出无需重新扫描应用，
 //! 图标也已经在内存/磁盘缓存中，可以做到「秒开」。
 
-use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+
+use windows::core::PCWSTR;
 
 use anyhow::Result;
 use windows::core::w;
@@ -18,8 +20,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage,
     RegisterClassW, SetForegroundWindow, SetWindowsHookExW, TrackPopupMenu, TranslateMessage,
-    UnhookWindowsHookEx, IDI_APPLICATION, KBDLLHOOKSTRUCT, MF_STRING, MSG, TPM_BOTTOMALIGN,
-    TPM_RIGHTBUTTON,
+    UnhookWindowsHookEx, IDI_APPLICATION, KBDLLHOOKSTRUCT, MF_SEPARATOR, MF_STRING, MSG,
+    TPM_BOTTOMALIGN, TPM_RIGHTBUTTON,
     WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_KEYUP,
     WM_LBUTTONUP, WM_RBUTTONUP, WM_SYSKEYUP, WNDCLASSW,
 };
@@ -29,7 +31,16 @@ use super::launcher;
 const TRAY_UID: u32 = 1;
 const WM_TRAYICON: u32 = WM_APP + 1;
 const CMD_SHOW: usize = 1;
-const CMD_QUIT: usize = 2;
+const CMD_SETTINGS: usize = 2;
+const CMD_QUIT: usize = 3;
+
+/// 托盘请求打开设置窗口时置位，由 Dart 侧轮询取走。
+static SETTINGS_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// 取走「打开设置」请求（读后清零）。
+pub fn take_settings_request() -> bool {
+    SETTINGS_REQUESTED.swap(false, Ordering::SeqCst)
+}
 
 /// 双击 Shift 的最大间隔（毫秒）。
 const DOUBLE_TAP_MS: u64 = 420;
@@ -78,6 +89,8 @@ unsafe extern "system" fn wnd_proc(
                     let _ = GetCursorPos(&mut point);
                     if let Ok(menu) = CreatePopupMenu() {
                         let _ = AppendMenuW(menu, MF_STRING, CMD_SHOW, w!("显示启动台"));
+                        let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS, w!("设置…"));
+                        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
                         let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("退出"));
                         // 必须先置前，否则菜单不会自动消失
                         let _ = SetForegroundWindow(hwnd);
@@ -101,6 +114,9 @@ unsafe extern "system" fn wnd_proc(
             match wparam.0 & 0xFFFF {
                 CMD_SHOW => {
                     let _ = launcher::show_window();
+                }
+                CMD_SETTINGS => {
+                    SETTINGS_REQUESTED.store(true, Ordering::SeqCst);
                 }
                 CMD_QUIT => {
                     let _ = launcher::quit_app();

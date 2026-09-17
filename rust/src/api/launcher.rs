@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex};
 
 use anyhow::{anyhow, Result};
-use windows::core::{Interface, BOOL, GUID, HSTRING, PCSTR, PCWSTR};
+use windows::core::{w, Interface, BOOL, GUID, HSTRING, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, SIZE};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetMonitorInfoW, GetObjectW,
@@ -16,13 +16,15 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemAlloc, CoTaskMemFree, CoUninitialize, IBindCtx,
-    CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
-    ApplicationActivationManager, IApplicationActivationManager, IContextMenu, IEnumIDList,
-    IShellFolder, IShellItem, IShellItemImageFactory, SHCreateItemFromIDList,
+    ApplicationActivationManager, FileOpenDialog, IApplicationActivationManager, IContextMenu,
+    IEnumIDList, IFileOpenDialog, IShellFolder, IShellItem, IShellItemImageFactory,
+    FOS_ALLOWMULTISELECT, FOS_ALLNONSTORAGEITEMS, FOS_FILEMUSTEXIST, FOS_PATHMUSTEXIST,
+    SIGDN_FILESYSPATH, SHCreateItemFromIDList,
     SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject,
     SHGetKnownFolderPath, ShellExecuteW, ACTIVATEOPTIONS, BHID_SFObject, BHID_SFUIObject,
     CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
@@ -580,6 +582,10 @@ enum LaunchPlan {
 }
 
 fn plan_for(id: &str) -> LaunchPlan {
+    // 用户手动添加的图标：id 本身就是文件路径
+    if std::path::Path::new(id).exists() {
+        return LaunchPlan::ShellExecute(id.to_string());
+    }
     let target = cached_target(id);
     if !target.is_empty() && std::path::Path::new(&target).exists() {
         return LaunchPlan::ShellExecute(target);
@@ -810,6 +816,45 @@ pub fn set_fullscreen(enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// 退出全屏并恢复成居中的普通窗口（设置页用）。
+///
+/// 与 `set_fullscreen(false)` 的区别：这里会把窗口尺寸真正还原成给定值，
+/// 否则窗口会保持「显示器大小 + 标题栏」，底部的按钮可能被挤到屏幕外。
+pub fn set_windowed(width: i32, height: i32) -> Result<()> {
+    let hwnd = main_window()?;
+    unsafe {
+        let style = *ORIGINAL_STYLE.lock().unwrap();
+        if style != 0 {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+        }
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let (left, top) = if GetMonitorInfoW(monitor, &mut mi).as_bool() {
+            let work = mi.rcWork; // 工作区，避开任务栏
+            (
+                work.left + ((work.right - work.left) - width) / 2,
+                work.top + ((work.bottom - work.top) - height) / 2,
+            )
+        } else {
+            (80, 60)
+        };
+        SetWindowPos(
+            hwnd,
+            Some(HWND_NOTOPMOST),
+            left,
+            top,
+            width,
+            height,
+            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+        )?;
+        let _ = SetForegroundWindow(hwnd);
+    }
+    Ok(())
+}
+
 /// 让窗口重新获得前台焦点（用于从最小化恢复）。
 pub fn focus_window() -> Result<()> {
     let hwnd = main_window()?;
@@ -861,6 +906,45 @@ pub fn quit_app() -> Result<()> {
 // ---------------------------------------------------------------------------
 // 目录
 // ---------------------------------------------------------------------------
+
+/// 弹出系统「打开文件」对话框，返回用户选中的可执行文件 / 快捷方式路径。
+///
+/// 用户取消时返回空列表。
+pub fn pick_files() -> Result<Vec<String>> {
+    let _com = ComScope::new();
+    unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+
+        let mut options = dialog.GetOptions()?;
+        options |= FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT | FOS_ALLNONSTORAGEITEMS
+            | FOS_PATHMUSTEXIST;
+        dialog.SetOptions(options)?;
+        dialog.SetTitle(w!("选择要添加到启动台的应用"))?;
+
+        let filters = [COMDLG_FILTERSPEC {
+            pszName: w!("应用程序"),
+            pszSpec: w!("*.exe;*.lnk;*.bat;*.cmd;*.url;*.msc"),
+        }];
+        dialog.SetFileTypes(&filters)?;
+
+        // 用户取消时 Show 返回 ERROR_CANCELLED
+        if dialog.Show(None).is_err() {
+            return Ok(Vec::new());
+        }
+
+        let items = dialog.GetResults()?;
+        let count = items.GetCount()?;
+        let mut paths = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let item: IShellItem = items.GetItemAt(index)?;
+            let name = item_display_name(&item, SIGDN_FILESYSPATH);
+            if !name.is_empty() {
+                paths.push(name);
+            }
+        }
+        Ok(paths)
+    }
+}
 
 /// 返回用于缓存图标/布局的本地目录（`%LOCALAPPDATA%\\WindowsLauncherPad`），不存在则创建。
 pub fn data_dir() -> String {

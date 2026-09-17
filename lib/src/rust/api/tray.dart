@@ -7,7 +7,11 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `tray_thread`, `wnd_proc`
+// These functions are ignored because they are not marked as `pub`: `keyboard_hook`, `tray_thread`, `wnd_proc`
+
+/// 取走「打开设置」请求（读后清零）。
+Future<bool> takeSettingsRequest() =>
+    RustLib.instance.api.crateApiTrayTakeSettingsRequest();
 
 /// 启动后台托盘与全局热键（`Ctrl+Alt+Space` 呼出）。重复调用是安全的。
 Future<void> initTray() => RustLib.instance.api.crateApiTrayInitTray();

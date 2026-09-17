@@ -74,12 +74,14 @@ class GlassContextMenu extends StatelessWidget {
             ),
             child: AdaptiveGlass(
               shape: const LiquidRoundedSuperellipse(borderRadius: 16),
+              // 降级：菜单是小面积浮层，minimal 档已经足够
+              quality: GlassQuality.minimal,
               settings: const LiquidGlassSettings(
-                blur: 24,
-                thickness: 26,
+                blur: 12,
+                thickness: 16,
                 glassColor: Color(0x3DFFFFFF),
-                saturation: 1.35,
-                lightIntensity: 0.45,
+                saturation: 1.2,
+                lightIntensity: 0.35,
                 whitenStrength: 0.12,
               ),
               child: Padding(

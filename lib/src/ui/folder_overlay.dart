@@ -137,8 +137,10 @@ class _FolderOverlayState extends State<FolderOverlay>
       builder: (context, candidate, rejected) {
         return AdaptiveGlass(
           shape: const LiquidRoundedSuperellipse(borderRadius: 34),
+          // 降级：面板在展开/收起时尺寸持续变化，minimal 档更稳也更省
+          quality: GlassQuality.minimal,
           settings: LiquidGlassSettings(
-            blur: 30,
+            blur: 16,
             thickness: 30,
             glassColor: Colors.white.withValues(alpha: _draggingOut ? 0.16 : 0.09),
             saturation: 1.35,

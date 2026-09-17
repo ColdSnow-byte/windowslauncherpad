@@ -20,6 +20,7 @@ class _LauncherAppState extends State<LauncherApp> {
   LauncherController? _controller;
   ui.Image? _wallpaperImage;
   String _wallpaperPath = '';
+  String _dataDir = '';
   bool _fullscreenApplied = false;
 
   @override
@@ -38,6 +39,7 @@ class _LauncherAppState extends State<LauncherApp> {
   Future<void> _boot() async {
     // 1) 布局存储
     final dir = await WinApi.dataDir();
+    _dataDir = dir;
     final store = await LayoutStore.open(dir);
 
     // 2) 控制器 + 后台枚举应用
@@ -108,6 +110,7 @@ class _LauncherAppState extends State<LauncherApp> {
           ? const _BootScreen()
           : LaunchpadScreen(
               controller: controller,
+              dataDir: _dataDir,
               wallpaperPath: _wallpaperPath,
               wallpaperImage: _wallpaperImage,
             ),

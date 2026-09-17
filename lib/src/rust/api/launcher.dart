@@ -43,6 +43,15 @@ Future<String> desktopWallpaper() =>
 Future<void> setFullscreen({required bool enabled}) =>
     RustLib.instance.api.crateApiLauncherSetFullscreen(enabled: enabled);
 
+/// 退出全屏并恢复成居中的普通窗口（设置页用）。
+///
+/// 与 `set_fullscreen(false)` 的区别：这里会把窗口尺寸真正还原成给定值，
+/// 否则窗口会保持「显示器大小 + 标题栏」，底部的按钮可能被挤到屏幕外。
+Future<void> setWindowed({required int width, required int height}) => RustLib
+    .instance
+    .api
+    .crateApiLauncherSetWindowed(width: width, height: height);
+
 /// 让窗口重新获得前台焦点（用于从最小化恢复）。
 Future<void> focusWindow() =>
     RustLib.instance.api.crateApiLauncherFocusWindow();
@@ -59,6 +68,12 @@ Future<bool> isWindowVisible() =>
 
 /// 真正退出进程。
 Future<void> quitApp() => RustLib.instance.api.crateApiLauncherQuitApp();
+
+/// 弹出系统「打开文件」对话框，返回用户选中的可执行文件 / 快捷方式路径。
+///
+/// 用户取消时返回空列表。
+Future<List<String>> pickFiles() =>
+    RustLib.instance.api.crateApiLauncherPickFiles();
 
 /// 返回用于缓存图标/布局的本地目录（`%LOCALAPPDATA%\\WindowsLauncherPad`），不存在则创建。
 Future<String> dataDir() => RustLib.instance.api.crateApiLauncherDataDir();

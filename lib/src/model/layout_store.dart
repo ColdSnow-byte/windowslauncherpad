@@ -26,8 +26,9 @@ class LayoutStore {
       final f = _layoutFile;
       if (!await f.exists()) return null;
       final text = await f.readAsString();
-      if (text.trim().isEmpty) return null;
-      final decoded = jsonDecode(text);
+      final cleaned = text.replaceFirst('\uFEFF', '').trim();
+      if (cleaned.isEmpty) return null;
+      final decoded = jsonDecode(cleaned);
       return decoded is Map<String, dynamic> ? decoded : null;
     } catch (_) {
       return null;

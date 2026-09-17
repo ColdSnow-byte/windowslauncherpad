@@ -58,10 +58,35 @@ class WinApi {
     }
   }
 
+  /// 弹出系统文件选择框，返回选中的路径（用户取消时为空）。
+  static Future<List<String>> pickFiles() async {
+    try {
+      return await rust.pickFiles();
+    } catch (_) {
+      return const <String>[];
+    }
+  }
+
+  /// 取走托盘发来的「打开设置」请求。
+  static Future<bool> takeSettingsRequest() async {
+    try {
+      return await rust_tray.takeSettingsRequest();
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 在资源管理器中定位应用文件。
   static Future<void> revealInExplorer(String id) async {
     try {
       await rust.revealInExplorer(id: id);
+    } catch (_) {}
+  }
+
+  /// 退出全屏并恢复成居中的普通窗口（设置页用）。
+  static Future<void> setWindowed(int width, int height) async {
+    try {
+      await rust.setWindowed(width: width, height: height);
     } catch (_) {}
   }
 

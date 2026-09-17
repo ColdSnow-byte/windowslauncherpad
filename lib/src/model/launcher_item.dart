@@ -8,7 +8,22 @@ class LauncherItem {
     required this.app,
     required this.children,
     required this.folderId,
+    this.customId,
   });
+
+  /// 用户手动添加的图标（可能是任意文件，未必在系统应用清单里）。
+  factory LauncherItem.custom({
+    required String id,
+    required String name,
+  }) =>
+      LauncherItem._(
+        ref: 'c:$id',
+        name: name,
+        app: null,
+        children: const <AppEntry>[],
+        folderId: null,
+        customId: id,
+      );
 
   /// 单个应用。
   factory LauncherItem.app(AppEntry app) => LauncherItem._(
@@ -40,10 +55,17 @@ class LauncherItem {
   final List<AppEntry> children;
   final String? folderId;
 
+  /// 手动添加的图标对应的标识（普通应用为 null）。
+  final String? customId;
+
   bool get isFolder => folderId != null;
+  bool get isCustom => customId != null;
 
   /// 应用 id（文件夹返回 null）。
   String? get appId => app?.id;
+
+  /// 取图标 / 启动统一使用的标识。
+  String get launchId => app?.id ?? customId ?? folderId ?? ref;
 
   /// 文件夹内应用数量。
   int get badgeCount => children.length;

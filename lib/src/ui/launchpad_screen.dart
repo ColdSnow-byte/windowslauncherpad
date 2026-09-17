@@ -4,6 +4,8 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:windowslauncherpad/src/model/source_config.dart';
+import 'package:windowslauncherpad/src/settings/settings_app.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
@@ -32,12 +34,16 @@ class LaunchpadScreen extends StatefulWidget {
   const LaunchpadScreen({
     super.key,
     required this.controller,
+    required this.dataDir,
     required this.wallpaperPath,
     required this.wallpaperImage,
     this.onHidden,
   });
 
   final LauncherController controller;
+
+  /// 数据目录（与设置窗口共享 `sources.json`）。
+  final String dataDir;
   final String wallpaperPath;
   final ui.Image? wallpaperImage;
 
@@ -87,6 +93,50 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
   bool _jiggleMode = false;
   int _pageIndex = 0;
 
+  /// 图标来源配置（自动扫描 / 手动添加）。
+  SourceConfig _source = const SourceConfig();
+
+  /// 设置页是否展开（在主窗口内承载）。
+  bool _settingsOpen = false;
+  Timer? _commandTimer;
+
+  /// 当前该展示的顶层格子。
+  List<LauncherItem> get _activeItems {
+    if (_source.mode == IconSourceMode.manual) {
+      return _source.custom
+          .map((e) => LauncherItem.custom(id: e.id, name: e.name))
+          .toList(growable: false);
+    }
+    return _c.visibleItems;
+  }
+
+  /// 在当前来源模式下做搜索。
+  List<LauncherItem> get _searchResults {
+    final query = _c.query.trim().toLowerCase();
+    if (query.isEmpty) return const <LauncherItem>[];
+    final result = <LauncherItem>[];
+    for (final item in _activeItems) {
+      if (item.isFolder) {
+        if (item.name.toLowerCase().contains(query)) {
+          result.add(item);
+        } else {
+          for (final child in item.children) {
+            if (child.name.toLowerCase().contains(query)) {
+              result.add(LauncherItem.app(child));
+            }
+          }
+        }
+      } else if (item.name.toLowerCase().contains(query)) {
+        result.add(item);
+      }
+    }
+    return result;
+  }
+
+  /// 当前实际渲染的格子（搜索时是结果，否则是全部）。
+  List<LauncherItem> get _displayItems =>
+      _c.isSearching ? _searchResults : _activeItems;
+
   _MenuRequest? _menu;
   LauncherItem? _openFolder;
   Rect? _folderOrigin;
@@ -116,9 +166,12 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
     _searchText.addListener(_onSearchChanged);
     WidgetsBinding.instance.addObserver(this);
     HardwareKeyboard.instance.addHandler(_globalKeyHandler);
+
     // 首帧就开始飞入，避免先渲染一帧静止的图标
     _intro.forward();
     _c.preloadIcons();
+    unawaited(_loadSource());
+    _startCommandWatch();
   }
 
   @override
@@ -137,6 +190,8 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
     _intro.forward();
     // 重新呼出后把焦点交还搜索框，直接打字即可搜索
     _searchFocus.requestFocus();
+    // 设置窗口可能刚改过图标来源，重新读一次配置
+    unawaited(_loadSource());
   }
 
   void _onIconsReady() {
@@ -160,11 +215,52 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
     _ghostTimer?.cancel();
     _summonTimer?.cancel();
     _wheelCooldown?.cancel();
+    _commandTimer?.cancel();
     super.dispose();
   }
 
   void _onControllerChanged() {
     if (mounted) setState(() {});
+  }
+
+  Future<void> _loadSource() async {
+    final config = await SourceConfigStore.load(widget.dataDir);
+    if (!mounted) return;
+    setState(() => _source = config);
+  }
+
+  /// 托盘「设置…」→ 收起启动台并打开（或复用）设置窗口。
+  /// 打开设置页。
+  ///
+  /// 这里刻意不再另开子窗口：`desktop_multi_window` 的子引擎不注册任何插件，
+  /// 导致 `desktop_drop` 的原生拖放目标根本不会创建，桌面拖入必然失效。
+  /// 改为在主窗口内承载，并把窗口切回普通窗口形态，观感上仍是一个设置窗口。
+  Future<void> _openSettings() async {
+    await WinApi.setWindowed(1120, 760);
+    if (!mounted) return;
+    setState(() => _settingsOpen = true);
+  }
+
+  Future<void> _closeSettings() async {
+    if (!mounted) return;
+    setState(() => _settingsOpen = false);
+    await WinApi.setFullscreen(true);
+    replayIntro();
+  }
+
+  void _startCommandWatch() {
+    _commandTimer?.cancel();
+    _commandTimer = Timer.periodic(const Duration(milliseconds: 350), (
+      timer,
+    ) async {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (await WinApi.takeSettingsRequest()) {
+        await _openSettings();
+      }
+    });
   }
 
   void _onSearchChanged() {
@@ -187,7 +283,7 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
   double get _pageWidth => _viewportWidth <= 0 ? 1 : _viewportWidth;
 
   int get _pageCount {
-    final items = _c.isSearching ? _c.searchResults : _c.visibleItems;
+    final items = _displayItems;
     final perPage = _layout?.perPage ?? 1;
     return math.max(1, (items.length + perPage - 1) ~/ perPage);
   }
@@ -281,7 +377,7 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
 
     if (event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter) {
-      final results = _c.searchResults;
+      final results = _searchResults;
       if (_c.isSearching && results.isNotEmpty) {
         unawaited(_activate(results.first));
         return KeyEventResult.handled;
@@ -350,7 +446,7 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
     try {
       await _exit.forward();
     } catch (_) {}
-    await WinApi.launchApp(item.app!.id);
+    await WinApi.launchApp(item.launchId);
     // 启动后收起启动台，但保留进程以便下次秒开。
     await _dismiss();
     _exit.value = 0;
@@ -381,7 +477,7 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
     );
     if (layout == null) return fallback;
 
-    final items = _c.isSearching ? _c.searchResults : _c.visibleItems;
+    final items = _displayItems;
     final index = items.indexWhere((e) => e.ref == item.ref);
     if (index < 0) return fallback;
 
@@ -565,7 +661,9 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
         icon: Icons.play_arrow_rounded,
         onSelected: () => _activate(item),
       ),
-      if (item.app!.kind == AppKind.win32 && _looksLikePath(item.app!.target))
+      if (item.app != null &&
+          item.app!.kind == AppKind.win32 &&
+          _looksLikePath(item.app!.target))
         GlassMenuEntry(
           label: '打开文件所在位置',
           icon: Icons.folder_open_rounded,
@@ -599,7 +697,7 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
 
   @override
   Widget build(BuildContext context) {
-    final items = _c.isSearching ? _c.searchResults : _c.visibleItems;
+    final items = _displayItems;
 
     return Focus(
       onKeyEvent: _onKey,
@@ -650,8 +748,19 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
                 onDismiss: () => setState(() => _menu = null),
               ),
             // 鼠标白色柔光（最上层，纯加色，不拦截指针）
+            if (_settingsOpen)
+              Positioned.fill(
+                child: ColoredBox(
+                  color: const Color(0xFF161A20),
+                  child: SettingsPage(
+                    dataDir: widget.dataDir,
+                    onDone: () => unawaited(_closeSettings()),
+                  ),
+                ),
+              ),
             const Positioned.fill(
-              child: CursorGlowLayer(radius: 190, child: SizedBox.expand()),
+              // 半径收小：混合面积与半径平方成正比
+              child: CursorGlowLayer(radius: 140, child: SizedBox.expand()),
             ),
           ],
         ),
@@ -835,6 +944,75 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
     );
   }
 
+  /// 是否给搜索框套液态玻璃材质（玻璃控件常驻会持续占用 GPU）。
+  static const bool _kGlassSearchBar = false;
+
+  Widget _buildSearchField() {
+    if (!_kGlassSearchBar) {
+      return TextField(
+        controller: _searchText,
+        focusNode: _searchFocus,
+        style: const TextStyle(color: Colors.white, fontSize: 14.5),
+        cursorColor: Colors.white,
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: '搜索',
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 34,
+            vertical: 12,
+          ),
+          prefixIcon: Icon(
+            Icons.search_rounded,
+            size: 18,
+            color: Colors.white.withValues(alpha: 0.7),
+          ),
+          prefixIconConstraints: const BoxConstraints(minWidth: 34),
+          hintStyle: TextStyle(
+            color: Colors.white.withValues(alpha: 0.6),
+            fontSize: 14.5,
+          ),
+          filled: true,
+          fillColor: Colors.white.withValues(alpha: 0.16),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(22),
+            borderSide: BorderSide(
+              color: Colors.white.withValues(alpha: 0.22),
+            ),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(22),
+            borderSide: BorderSide(
+              color: Colors.white.withValues(alpha: 0.38),
+            ),
+          ),
+        ),
+      );
+    }
+    return GlassSearchBar(
+      controller: _searchText,
+      focusNode: _searchFocus,
+      placeholder: '搜索',
+      autofocus: true,
+      showsCancelButton: false,
+      height: 44,
+      searchIconColor: Colors.white.withValues(alpha: 0.75),
+      textStyle: const TextStyle(color: Colors.white, fontSize: 14.5),
+      placeholderStyle: TextStyle(
+        color: Colors.white.withValues(alpha: 0.6),
+        fontSize: 14.5,
+      ),
+      quality: GlassQuality.minimal,
+      settings: const LiquidGlassSettings(
+        blur: 12,
+        thickness: 16,
+        glassColor: Color(0x30FFFFFF),
+        saturation: 1.2,
+        lightIntensity: 0.35,
+      ),
+      onChanged: (_) => setState(() {}),
+    );
+  }
+
   Widget _buildTopBar(Size size) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(_sidePadding, 34, _sidePadding, 8),
@@ -846,31 +1024,7 @@ class _LaunchpadScreenState extends State<LaunchpadScreen>
               alignment: Alignment.center,
               child: SizedBox(
                 width: 360,
-                child: GlassSearchBar(
-                  controller: _searchText,
-                  focusNode: _searchFocus,
-                  placeholder: '搜索',
-                  autofocus: true,
-                  showsCancelButton: false,
-                  height: 44,
-                  searchIconColor: Colors.white.withValues(alpha: 0.75),
-                  textStyle: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14.5,
-                  ),
-                  placeholderStyle: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.6),
-                    fontSize: 14.5,
-                  ),
-                  settings: const LiquidGlassSettings(
-                    blur: 22,
-                    thickness: 24,
-                    glassColor: Color(0x30FFFFFF),
-                    saturation: 1.3,
-                    lightIntensity: 0.4,
-                  ),
-                  onChanged: (_) => setState(() {}),
-                ),
+                child: _buildSearchField(),
               ),
             ),
           ),

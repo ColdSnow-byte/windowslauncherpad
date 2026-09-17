@@ -5,9 +5,9 @@ import 'package:flutter/material.dart';
 
 /// macOS 启动台背景：桌面壁纸经过重度模糊 + 提升饱和度 + 泛光，再整体压暗。
 ///
-/// 用 [CustomPaint] 一次绘制两层（主层 + 加色泛光层），比堆叠 widget 模糊开销低得多，
-/// 且整块被 [RepaintBoundary] 包住，静态时只光栅化一次。
-class WallpaperBackdrop extends StatelessWidget {
+/// 性能考量：模糊与泛光**只在壁纸变化时烘焙一次**，并且烘焙到 1/4 分辨率的小图上。
+/// 运行时每帧只做一次 `drawImageRect` 放大绘制，渲染树里不再有全屏 `saveLayer`。
+class WallpaperBackdrop extends StatefulWidget {
   const WallpaperBackdrop({
     super.key,
     required this.wallpaperPath,
@@ -24,34 +24,69 @@ class WallpaperBackdrop extends StatelessWidget {
   final double dim;
 
   @override
-  Widget build(BuildContext context) {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        const _FallbackGradient(),
-        if (wallpaperImage != null)
-          Positioned.fill(
-            child: RepaintBoundary(
-              child: CustomPaint(
-                painter: _WallpaperPainter(wallpaperImage!),
-                isComplex: true,
-                willChange: false,
-              ),
-            ),
-          )
-        else if (wallpaperPath.isNotEmpty)
-          Positioned.fill(child: _FileWallpaper(path: wallpaperPath)),
-        ColoredBox(color: Colors.black.withValues(alpha: dim)),
-        const _Vignette(),
-      ],
-    );
-  }
+  State<WallpaperBackdrop> createState() => _WallpaperBackdropState();
 }
 
-class _WallpaperPainter extends CustomPainter {
-  const _WallpaperPainter(this.image);
+class _WallpaperBackdropState extends State<WallpaperBackdrop> {
+  /// 烘焙分辨率相对屏幕的缩放比例。
+  static const double _scale = 0.25;
 
-  final ui.Image image;
+  ui.Image? _baked;
+  Size? _bakedFor;
+
+  @override
+  void dispose() {
+    _baked?.dispose();
+    super.dispose();
+  }
+
+  void _ensureBaked(Size screen) {
+    final source = widget.wallpaperImage;
+    if (source == null) {
+      if (_baked != null) {
+        _baked?.dispose();
+        _baked = null;
+        _bakedFor = null;
+      }
+      return;
+    }
+    final target = Size(
+      (screen.width * _scale).roundToDouble().clamp(64, 1024),
+      (screen.height * _scale).roundToDouble().clamp(64, 1024),
+    );
+    if (_baked != null && _bakedFor == target) return;
+    _baked?.dispose();
+    _baked = _bake(source, target);
+    _bakedFor = target;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        _ensureBaked(constraints.biggest);
+        final baked = _baked;
+        return Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            const _FallbackGradient(),
+            if (baked != null)
+              Positioned.fill(
+                child: RepaintBoundary(
+                  child: CustomPaint(painter: _BakedBackdropPainter(baked)),
+                ),
+              )
+            else if (widget.wallpaperPath.isNotEmpty)
+              Positioned.fill(
+                child: _FileWallpaper(path: widget.wallpaperPath),
+              ),
+            ColoredBox(color: Colors.black.withValues(alpha: widget.dim)),
+            const _Vignette(),
+          ],
+        );
+      },
+    );
+  }
 
   static const List<double> _lum = <double>[0.2126, 0.7152, 0.0722];
 
@@ -77,43 +112,44 @@ class _WallpaperPainter extends CustomPainter {
     return Rect.fromLTWH(0, (src.height - h) / 2, src.width, h);
   }
 
-  @override
-  void paint(Canvas canvas, Size size) {
-    final src = Rect.fromLTWH(
-      0,
-      0,
-      image.width.toDouble(),
-      image.height.toDouble(),
+  /// 把两层模糊 + 泛光合成到一张小图上（只在壁纸或屏幕尺寸变化时执行）。
+  static ui.Image _bake(ui.Image source, Size target) {
+    final w = target.width.toInt();
+    final h = target.height.toInt();
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final dst = Rect.fromLTWH(0, 0, target.width, target.height);
+    final src = _srcCover(
+      Size(source.width.toDouble(), source.height.toDouble()),
+      target,
     );
-    // 稍微放大目标矩形，避免模糊在边缘出现半透明收缩
-    final dst = (Offset.zero & size).inflate(48);
 
-    // ── 主层：中等模糊 + 提升饱和度 ────────────────────────────────────────
+    // 主层：中等模糊 + 提升饱和度
     canvas.saveLayer(
       dst,
       Paint()
         ..imageFilter = ui.ImageFilter.blur(
-          sigmaX: 42,
-          sigmaY: 42,
+          sigmaX: 11,
+          sigmaY: 11,
           tileMode: TileMode.decal,
         )
         ..colorFilter = ColorFilter.matrix(_saturationMatrix(1.45)),
     );
     canvas.drawImageRect(
-      image,
-      _srcCover(src.size, dst.size),
+      source,
+      src,
       dst,
       Paint()..filterQuality = FilterQuality.medium,
     );
     canvas.restore();
 
-    // ── 泛光层：重度模糊 + 加色混合，还原 macOS 的彩色溢光 ─────────────────
+    // 泛光层：重度模糊 + 加色混合
     canvas.saveLayer(
       dst,
       Paint()
         ..imageFilter = ui.ImageFilter.blur(
-          sigmaX: 120,
-          sigmaY: 120,
+          sigmaX: 30,
+          sigmaY: 30,
           tileMode: TileMode.decal,
         )
         ..colorFilter = ColorFilter.matrix(_saturationMatrix(2.1))
@@ -121,16 +157,37 @@ class _WallpaperPainter extends CustomPainter {
         ..blendMode = BlendMode.plus,
     );
     canvas.drawImageRect(
-      image,
-      _srcCover(src.size, dst.size),
+      source,
+      src,
       dst,
       Paint()..filterQuality = FilterQuality.low,
     );
     canvas.restore();
+
+    final picture = recorder.endRecording();
+    final image = picture.toImageSync(w, h);
+    picture.dispose();
+    return image;
+  }
+}
+
+class _BakedBackdropPainter extends CustomPainter {
+  const _BakedBackdropPainter(this.image);
+
+  final ui.Image image;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawImageRect(
+      image,
+      Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+      Offset.zero & size,
+      Paint()..filterQuality = FilterQuality.medium,
+    );
   }
 
   @override
-  bool shouldRepaint(_WallpaperPainter oldDelegate) =>
+  bool shouldRepaint(_BakedBackdropPainter oldDelegate) =>
       oldDelegate.image != image;
 }
 

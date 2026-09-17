@@ -239,7 +239,7 @@ class LaunchpadGrid extends StatelessWidget {
     if (item.isFolder) {
       return item.children.map((a) => _assetOf(a.id)).toList();
     }
-    return <IconAsset?>[_assetOf(item.app!.id)];
+    return <IconAsset?>[_assetOf(item.launchId)];
   }
 
   IconAsset? _assetOf(String appId) {
